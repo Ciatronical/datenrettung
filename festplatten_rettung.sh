@@ -12,6 +12,9 @@
 #          damit sich sortiert/ ohne Nachfragen auf FAT32/exFAT/NTFS/Windows
 #          kopieren lässt.
 #
+# Unterstützt Festplatten, USB-Sticks und SD-Karten (USB-Kartenleser /dev/sdX
+# wie auch eingebaute Leser /dev/mmcblkN).
+#
 # Aufruf:  bash ./festplatten_rettung.sh                     (komplett interaktiv)
 #          bash ./festplatten_rettung.sh /dev/sdX /pfad/ziel (direkt)
 #
@@ -53,8 +56,10 @@ if [[ -z "$QUELLE" ]]; then
     echo "== Verfügbare Laufwerke =="
     lsblk -o NAME,SIZE,MODEL,TRAN -e7
     echo
+    echo "SD-Karten: im USB-Leser als sdX, im eingebauten Leser als mmcblkN."
+    echo "Geräte mit 0B sind leere Kartenleser-Slots."
     [[ -n "$SYSDISK" ]] && echo "Systemplatte: $SYSDISK (gesperrt, nicht wählbar)"
-    read -rp "Zu rettendes Gerät (z.B. sda): " QUELLE
+    read -rp "Zu rettendes Gerät (z.B. sdb oder mmcblk0): " QUELLE
 fi
 [[ "$QUELLE" == /dev/* ]] || QUELLE="/dev/$QUELLE"
 [[ -b "$QUELLE" ]] || { echo "FEHLER: $QUELLE ist kein Blockgerät."; exit 1; }
@@ -68,6 +73,13 @@ fi
 
 if [[ -n "$SYSDISK" && "$QUELLE" == "/dev/$SYSDISK" ]]; then
     echo "FEHLER: $QUELLE ist die Systemplatte – Abbruch."
+    exit 1
+fi
+
+# Leerer Kartenleser-Slot?
+PLATTE_B=$(blockdev --getsize64 "$QUELLE" 2>/dev/null || echo 0)
+if (( PLATTE_B == 0 )); then
+    echo "FEHLER: $QUELLE hat 0 Byte – keine Karte eingesteckt?"
     exit 1
 fi
 
@@ -91,7 +103,6 @@ if [[ "$ZIEL_DEV" == "$QUELLE"* ]]; then
 fi
 
 # Platzcheck
-PLATTE_B=$(blockdev --getsize64 "$QUELLE")
 FREI_B=$(df --output=avail -B1 "$ZIEL" | tail -1)
 if (( FREI_B < PLATTE_B )); then
     echo "WARNUNG: Freier Platz ($((FREI_B/1024**3)) GiB) < Plattengröße ($((PLATTE_B/1024**3)) GiB)."
@@ -99,10 +110,15 @@ if (( FREI_B < PLATTE_B )); then
     [[ "$a" =~ ^[jJ]$ ]] || exit 1
 fi
 
-# Vom Desktop automatisch gemountete Partitionen der Quelle aushängen
-while read -r mp; do
-    [[ -n "$mp" ]] && umount "$mp" && echo "-> $mp ausgehängt"
-done < <(lsblk -nro MOUNTPOINT "$QUELLE")
+# Vom Desktop automatisch gemountete Partitionen der Quelle aushängen.
+# Über den Gerätenamen statt den Mountpunkt – funktioniert auch bei Labels
+# mit Leerzeichen (z.B. "NO NAME" bei SD-Karten).
+for dev in $(lsblk -nlpo NAME "$QUELLE"); do
+    if findmnt -S "$dev" >/dev/null; then
+        umount "$dev" && echo "-> $dev ausgehängt" \
+            || { echo "FEHLER: $dev lässt sich nicht aushängen (noch in Benutzung?)."; exit 1; }
+    fi
+done
 
 IMG="$ZIEL/platte.img"
 MAP="$ZIEL/platte.map"
